@@ -165,7 +165,7 @@ class DetectionGUI:
         display_mode_frame = ttk.Frame(image_frame)
         display_mode_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        self.show_image_var = tk.BooleanVar(value=True)
+        self.show_image_var = tk.BooleanVar(value=False)  # 默认不显示图像区域
         self.show_image_check = ttk.Checkbutton(
             display_mode_frame, 
             text="显示图像区域", 
@@ -272,6 +272,9 @@ class DetectionGUI:
         
         # 初始显示空白图像
         self._update_image_display(self.image_processor.get_image())
+        
+        # 应用默认的图像显示设置（默认隐藏图像区域）
+        self._toggle_image_display()
         
     def _refresh_ports(self):
         """刷新可用串口列表"""
@@ -394,29 +397,22 @@ class DetectionGUI:
         self._update_status(f"无法连接到串口 {port}")
         messagebox.showerror("连接失败", f"无法连接到串口 {port}")
         
-        # 恢复按钮状态
-        self.connect_button.config(state=tk.NORMAL)
-        self.auto_connect_button.config(state=tk.NORMAL)
-        
-        # 恢复波特率选择状态
-        if not self.auto_detect_var.get():
-            self.baudrate_combobox.config(state=tk.NORMAL)
+        # 强制重置连接状态
+        self._force_reset_connection_state()
     
     def _connection_error(self, port, error_msg):
         """连接错误后的UI更新"""
         self._update_status(f"连接 {port} 时发生错误: {error_msg}")
         messagebox.showerror("连接错误", f"连接 {port} 时发生错误:\n{error_msg}")
         
-        # 恢复按钮状态
-        self.connect_button.config(state=tk.NORMAL)
-        self.auto_connect_button.config(state=tk.NORMAL)
-        
-        # 恢复波特率选择状态
-        if not self.auto_detect_var.get():
-            self.baudrate_combobox.config(state=tk.NORMAL)
+        # 强制重置连接状态
+        self._force_reset_connection_state()
     
     def _disconnect_serial(self):
         """断开串口连接"""
+        # 强制停止自动检测状态和恢复控件状态
+        self._force_reset_connection_state()
+        
         if self.serial_receiver:
             # 先清理缓冲区
             self.serial_receiver.clear_objects()
@@ -427,6 +423,8 @@ class DetectionGUI:
         
         self._update_status("串口连接已断开")
         
+    def _force_reset_connection_state(self):
+        """强制重置所有连接相关的控件状态"""
         # 恢复按钮状态
         self.connect_button.config(state=tk.NORMAL)
         self.auto_connect_button.config(state=tk.NORMAL)
