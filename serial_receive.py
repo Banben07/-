@@ -24,9 +24,16 @@ class SerialReceiver:
         self.auto_detect_baudrate = False
         self.detected_baudrate = None
         
+        # 混合检测方案配置
+        self.detection_methods = ['hardware_timing', 'software_quality']  # 检测方法优先级
+        self.hardware_detection_enabled = True
+        self.timing_samples = []  # 存储时序测量样本
+        self.detection_results = {}  # 存储各种方法的检测结果
+        
     def detect_baudrate(self, port=None, test_duration=2.0):
         """
-        自动检测串口的波特率
+        混合波特率检测方法
+        优先使用硬件时序检测，失败时回退到软件质量评估
         
         Args:
             port: 串口端口，如果为None则使用self.port
@@ -41,7 +48,80 @@ class SerialReceiver:
         if not self.port:
             raise ValueError("未指定串口端口")
         
-        print("开始自动检测波特率...")
+        print("开始混合波特率检测...")
+        self.detection_results = {}
+        
+        # 方法1: 硬件时序检测
+        if self.hardware_detection_enabled and 'hardware_timing' in self.detection_methods:
+            print("\n=== 尝试硬件时序检测 ===")
+            try:
+                hw_baudrate, hw_confidence, hw_results = self._hardware_timing_detection(
+                    self.port, test_duration * 0.5  # 硬件检测用一半时间
+                )
+                
+                self.detection_results['hardware_timing'] = {
+                    'baudrate': hw_baudrate,
+                    'confidence': hw_confidence,
+                    'details': hw_results,
+                    'method': 'hardware_timing'
+                }
+                
+                # 如果硬件检测置信度足够高，直接使用结果
+                if hw_confidence >= 0.7:  # 70%以上置信度
+                    print(f"✓ 硬件时序检测成功: {hw_baudrate} (置信度: {hw_confidence:.2f})")
+                    self.detected_baudrate = hw_baudrate
+                    return hw_baudrate
+                else:
+                    print(f"⚠ 硬件时序检测置信度较低: {hw_confidence:.2f}")
+                    
+            except Exception as e:
+                print(f"✗ 硬件时序检测失败: {e}")
+                self.detection_results['hardware_timing'] = {
+                    'error': str(e),
+                    'method': 'hardware_timing'
+                }
+        
+        # 方法2: 软件质量评估（原有方法）
+        if 'software_quality' in self.detection_methods:
+            print("\n=== 使用软件质量评估 ===")
+            try:
+                sw_baudrate = self._software_quality_detection(self.port, test_duration)
+                
+                if sw_baudrate:
+                    print(f"✓ 软件质量评估检测: {sw_baudrate}")
+                    
+                    # 如果有硬件检测结果，进行比较
+                    if 'hardware_timing' in self.detection_results:
+                        hw_result = self.detection_results['hardware_timing']
+                        if 'baudrate' in hw_result and hw_result['baudrate']:
+                            # 混合决策：考虑两种方法的结果
+                            final_baudrate = self._hybrid_decision(hw_result, sw_baudrate)
+                            print(f"✓ 混合决策结果: {final_baudrate}")
+                            self.detected_baudrate = final_baudrate
+                            return final_baudrate
+                    
+                    # 只有软件检测结果
+                    self.detected_baudrate = sw_baudrate
+                    return sw_baudrate
+                    
+            except Exception as e:
+                print(f"✗ 软件质量评估失败: {e}")
+        
+        print("✗ 所有检测方法都失败")
+        return None
+    
+    def _software_quality_detection(self, port, test_duration):
+        """
+        软件质量评估检测方法（原有方法）
+        
+        Args:
+            port: 串口端口
+            test_duration: 测试时间
+            
+        Returns:
+            int: 检测到的波特率
+        """
+        print("开始软件质量评估检测...")
         
         best_baudrate = None
         best_score = 0
@@ -52,7 +132,7 @@ class SerialReceiver:
             try:
                 # 尝试使用当前波特率连接
                 test_serial = serial.Serial(
-                    port=self.port,
+                    port=port,
                     baudrate=baudrate,
                     timeout=0.1  # 短超时时间用于快速检测
                 )
@@ -87,17 +167,48 @@ class SerialReceiver:
                 print(f"测试波特率 {baudrate} 时出错: {e}")
                 continue
         
-        if best_baudrate and best_score > 0:
-            self.detected_baudrate = best_baudrate
-            print(f"检测到最佳波特率: {best_baudrate} (分数: {best_score})")
-            return best_baudrate
+        return best_baudrate if best_score > 0 else None
+    
+    def _hybrid_decision(self, hw_result, sw_baudrate):
+        """
+        混合决策：结合硬件时序检测和软件质量评估的结果
+        
+        Args:
+            hw_result: 硬件检测结果
+            sw_baudrate: 软件检测波特率
+            
+        Returns:
+            int: 最终决定的波特率
+        """
+        hw_baudrate = hw_result.get('baudrate')
+        hw_confidence = hw_result.get('confidence', 0.0)
+        
+        print(f"混合决策分析:")
+        print(f"  硬件检测: {hw_baudrate} (置信度: {hw_confidence:.2f})")
+        print(f"  软件检测: {sw_baudrate}")
+        
+        # 决策规则
+        if hw_confidence >= 0.5:  # 硬件检测有一定置信度
+            if hw_baudrate == sw_baudrate:
+                # 两种方法结果一致，置信度最高
+                print("  决策：两种方法结果一致，采用该结果")
+                return hw_baudrate
+            else:
+                # 结果不一致，倾向于硬件检测（更精确）
+                if hw_confidence >= 0.6:
+                    print("  决策：硬件检测置信度较高，采用硬件结果")
+                    return hw_baudrate
+                else:
+                    print("  决策：硬件检测置信度不够，采用软件结果")
+                    return sw_baudrate
         else:
-            print("未检测到合适的波特率")
-            return None
+            # 硬件检测置信度很低，使用软件检测结果
+            print("  决策：硬件检测置信度过低，采用软件结果")
+            return sw_baudrate
     
     def _evaluate_data_quality(self, data_samples):
         """
-        评估接收到的数据质量
+        评估接收到的数据质量 - 通用版本
         
         Args:
             data_samples: 数据样本列表
@@ -115,37 +226,46 @@ class SerialReceiver:
         
         score = 0
         
-        # 1. 数据量评分 (最高20分)
-        data_length_score = min(len(combined_data) / 100, 20)
+        # 1. 数据量评分 (最高40分) - 提高权重
+        # 数据越多表示通信越稳定
+        data_length_score = min(len(combined_data) / 50, 40)  # 50字符以上给满分
         score += data_length_score
         
-        # 2. 可打印字符比例评分 (最高30分)
+        # 2. 可打印字符比例评分 (最高40分) - 提高权重  
+        # 可打印字符比例越高表示数据传输质量越好
         printable_chars = sum(1 for c in combined_data if 32 <= ord(c) <= 126 or c in '\r\n\t')
         printable_ratio = printable_chars / len(combined_data) if combined_data else 0
-        printable_score = printable_ratio * 30
+        printable_score = printable_ratio * 40
         score += printable_score
         
-        # 3. 特定模式匹配评分 (最高50分)
-        pattern_score = 0
+        # 3. 数据连续性和规律性评分 (最高20分)
+        consistency_score = 0
         
-        # 检查是否包含目标检测相关的关键词
-        keywords = ['class:', 'score:', 'bbox:']
-        for keyword in keywords:
-            if keyword in combined_data:
-                pattern_score += 10
-        
-        # 检查是否包含完整的目标检测模式
-        pattern = r'class:\d+.*?score:\d+.*?bbox:\d+'
-        matches = re.findall(pattern, combined_data, re.DOTALL)
-        pattern_score += len(matches) * 5
-        
-        # 检查数字模式
+        # 检查是否包含数字（很多串口应用都会传输数字）
         if re.search(r'\d+', combined_data):
-            pattern_score += 5
+            consistency_score += 8
         
-        score += min(pattern_score, 50)
+        # 检查是否包含字母（表示有结构化数据）
+        if re.search(r'[a-zA-Z]+', combined_data):
+            consistency_score += 6
         
-        return score
+        # 检查是否有重复模式（如循环发送的数据）
+        # 检测重复的字符或数字模式
+        if len(combined_data) >= 4:
+            # 简单检测：是否有重复的2字符模式
+            for i in range(len(combined_data) - 3):
+                pattern = combined_data[i:i+2]
+                if pattern in combined_data[i+2:]:
+                    consistency_score += 3
+                    break
+            
+        # 检查换行符的存在（表示结构化数据）
+        if '\n' in combined_data or '\r' in combined_data:
+            consistency_score += 3
+        
+        score += min(consistency_score, 20)
+        
+        return min(score, 100)  # 确保不超过100分
         
     def connect_with_auto_detect(self, port=None, test_duration=2.0):
         """
@@ -202,17 +322,37 @@ class SerialReceiver:
             return False
     
     def get_connection_info(self):
-        """获取连接信息"""
+        """获取连接信息，包括混合检测的详细结果"""
         if self.serial and self.serial.is_open:
             info = {
                 'port': self.port,
                 'baudrate': self.baudrate,
                 'timeout': self.timeout,
                 'auto_detected': self.auto_detect_baudrate,
-                'detected_baudrate': self.detected_baudrate
+                'detected_baudrate': self.detected_baudrate,
+                'detection_methods': self.detection_methods,
+                'detection_results': self.detection_results
             }
             return info
         return None
+    
+    def get_detection_summary(self):
+        """获取检测方法的摘要信息"""
+        if not self.detection_results:
+            return "未进行检测"
+        
+        summary = []
+        
+        for method, result in self.detection_results.items():
+            if method == 'hardware_timing':
+                if 'error' in result:
+                    summary.append(f"硬件时序检测: 失败 ({result['error']})")
+                else:
+                    summary.append(f"硬件时序检测: {result['baudrate']} (置信度: {result['confidence']:.2f})")
+            elif method == 'software_quality':
+                summary.append(f"软件质量评估: {result.get('baudrate', '失败')}")
+        
+        return "; ".join(summary)
     
     def disconnect(self):
         """断开串口连接"""
@@ -897,6 +1037,187 @@ class SerialReceiver:
         ymax = max(box[3] for box in boxes)
         
         return (xmin, ymin, xmax, ymax)
+
+    def _hardware_timing_detection(self, port, test_duration=1.0):
+        """
+        硬件时序检测方法 - 通过分析ASCII字符'2'(0x32)的时序来检测波特率
+        
+        Args:
+            port: 串口端口
+            test_duration: 检测持续时间
+            
+        Returns:
+            tuple: (检测到的波特率, 置信度, 详细结果)
+        """
+        print("开始硬件时序检测...")
+        print("检测目标: ASCII字符'2' (0x32 = 00110010)")
+        
+        # 常见波特率对应的位时间 (微秒)
+        baudrate_bit_times = {}
+        for baudrate in self.common_baudrates:
+            bit_time_us = 1000000 / baudrate  # 微秒
+            baudrate_bit_times[baudrate] = bit_time_us
+        
+        timing_results = {}
+        
+        for baudrate in self.common_baudrates:
+            print(f"测试波特率: {baudrate} (位时间: {baudrate_bit_times[baudrate]:.1f}μs)")
+            
+            try:
+                # 创建测试串口连接
+                test_serial = serial.Serial(
+                    port=port,
+                    baudrate=baudrate,
+                    timeout=0.1
+                )
+                
+                # 清空缓冲区
+                test_serial.reset_input_buffer()
+                
+                # 收集ASCII字符'2'的时序样本
+                timing_samples = self._collect_ascii2_timing_samples(test_serial, test_duration)
+                
+                test_serial.close()
+                
+                if timing_samples:
+                    # 分析时序样本，计算置信度
+                    confidence = self._analyze_ascii2_timing_samples(
+                        timing_samples, 
+                        baudrate_bit_times[baudrate]
+                    )
+                    timing_results[baudrate] = {
+                        'confidence': confidence,
+                        'samples': len(timing_samples),
+                        'expected_bit_time': baudrate_bit_times[baudrate]
+                    }
+                    print(f"  样本数: {len(timing_samples)}, 置信度: {confidence:.2f}")
+                else:
+                    timing_results[baudrate] = {
+                        'confidence': 0.0,
+                        'samples': 0,
+                        'expected_bit_time': baudrate_bit_times[baudrate]
+                    }
+                    print(f"  未检测到有效时序")
+                
+            except Exception as e:
+                print(f"  测试波特率 {baudrate} 时出错: {e}")
+                timing_results[baudrate] = {
+                    'confidence': 0.0,
+                    'samples': 0,
+                    'error': str(e)
+                }
+        
+        # 找出置信度最高的波特率
+        best_baudrate = None
+        best_confidence = 0.0
+        
+        for baudrate, result in timing_results.items():
+            if result['confidence'] > best_confidence:
+                best_confidence = result['confidence']
+                best_baudrate = baudrate
+        
+        return best_baudrate, best_confidence, timing_results
+    
+    def _collect_ascii2_timing_samples(self, test_serial, duration):
+        """
+        收集ASCII字符'2'的时序样本
+        
+        Args:
+            test_serial: 测试串口对象
+            duration: 采样持续时间
+            
+        Returns:
+            list: 时序样本列表 [(时间戳, 字符数据), ...]
+        """
+        import time
+        
+        samples = []
+        start_time = time.time()
+        
+        while time.time() - start_time < duration:
+            if test_serial.in_waiting > 0:
+                # 记录接收时间戳和数据
+                timestamp = time.time()
+                try:
+                    data = test_serial.read(test_serial.in_waiting)
+                    if data:
+                        # 检查是否包含ASCII字符'2'
+                        for byte_val in data:
+                            if byte_val == 0x32:  # ASCII '2'
+                                samples.append((timestamp, chr(byte_val)))
+                except Exception:
+                    pass
+            
+            time.sleep(0.001)  # 1ms精度
+        
+        return samples
+    
+    def _analyze_ascii2_timing_samples(self, samples, expected_bit_time_us):
+        """
+        分析ASCII字符'2'的时序样本，计算与期望波特率的匹配度
+        
+        ASCII '2' = 0x32 = 00110010 (binary)
+        串口帧格式: [起始位0][数据位00110010][停止位1]
+        
+        Args:
+            samples: 时序样本
+            expected_bit_time_us: 期望的位时间（微秒）
+            
+        Returns:
+            float: 置信度 (0.0-1.0)
+        """
+        if len(samples) < 2:
+            return 0.0
+        
+        # 计算样本间的时间间隔
+        intervals = []
+        for i in range(1, len(samples)):
+            interval_s = samples[i][0] - samples[i-1][0]
+            interval_us = interval_s * 1000000  # 转换为微秒
+            intervals.append(interval_us)
+        
+        if not intervals:
+            return 0.0
+        
+        # ASCII '2' (0x32) 的位模式分析
+        # 二进制: 00110010
+        # 完整帧: 起始(0) + 数据(00110010) + 停止(1)
+        # 预期字符间隔应该是10位的倍数（考虑连续发送）
+        
+        confidence_scores = []
+        
+        for interval_us in intervals:
+            # ASCII字符'2'的传输包含10位（起始位+8数据位+停止位）
+            # 连续发送'2'时，间隔应该是10位时间的倍数
+            expected_char_time = expected_bit_time_us * 10  # 单个字符时间
+            
+            # 检查间隔是否接近字符时间的整数倍
+            best_match = 0.0
+            for multiplier in [1, 2, 3, 4, 5]:  # 检查1-5个字符的间隔
+                expected_interval = expected_char_time * multiplier
+                error = abs(interval_us - expected_interval) / expected_interval
+                match_score = max(0, 1.0 - error)
+                best_match = max(best_match, match_score)
+            
+            confidence_scores.append(best_match)
+        
+        # 计算平均置信度
+        if confidence_scores:
+            avg_confidence = sum(confidence_scores) / len(confidence_scores)
+            
+            # 样本数量加权 - 更多样本提高置信度
+            sample_weight = min(len(samples) / 5.0, 1.0)  # 降低样本要求
+            
+            # ASCII '2' 特定的置信度提升
+            # 如果检测到规律的'2'字符，额外增加置信度
+            if len(samples) >= 3:
+                # 检查是否有规律的间隔模式
+                if len(set(int(i/1000) for i in intervals[:3])) <= 2:  # 间隔相似（毫秒级精度）
+                    avg_confidence *= 1.2  # 20%置信度奖励
+            
+            return min(avg_confidence * sample_weight, 1.0)
+        
+        return 0.0
 
 # 测试代码
 if __name__ == "__main__":

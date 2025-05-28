@@ -16,6 +16,7 @@ class MockSerial:
         self.auto_generate = False
         self.generate_thread = None
         self.stop_generate = False
+        self.data_mode = None
     
     def open(self):
         """打开模拟串口"""
@@ -63,13 +64,14 @@ class MockSerial:
             self.data_buffer.extend(data)
             self.in_waiting = len(self.data_buffer)
     
-    def start_auto_generate(self, interval=0.5):
+    def start_auto_generate(self, interval=0.5, data_mode="generic"):
         """开始自动生成测试数据"""
         if self.auto_generate:
             return
             
         self.auto_generate = True
         self.stop_generate = False
+        self.data_mode = data_mode  # 添加数据模式选择
         self.generate_thread = threading.Thread(target=self._generate_data_loop, args=(interval,), daemon=True)
         self.generate_thread.start()
     
@@ -83,8 +85,12 @@ class MockSerial:
     def _generate_data_loop(self, interval):
         """数据生成循环"""
         while self.auto_generate and not self.stop_generate:
-            # 生成随机的目标检测数据
-            test_data = self._generate_detection_data()
+            # 根据模式选择数据生成方法
+            if hasattr(self, 'data_mode') and self.data_mode == "detection":
+                test_data = self._generate_detection_data()
+            else:
+                test_data = self._generate_generic_data()
+            
             self.add_data(test_data)
             time.sleep(interval)
     
@@ -112,6 +118,45 @@ class MockSerial:
             data_parts.append(obj_data)
         
         return "".join(data_parts)
+    
+    def _generate_generic_data(self):
+        """生成通用的串口测试数据"""
+        data_types = [
+            "number_cycle",      # 数字循环
+            "sensor_data",       # 传感器数据
+            "simple_commands",   # 简单命令
+            "mixed_data"         # 混合数据
+        ]
+        
+        data_type = random.choice(data_types)
+        
+        if data_type == "number_cycle":
+            # 循环发送数字（如题目中提到的"2"）
+            number = random.choice([1, 2, 3, 42, 100])
+            return f"{number}\n" * random.randint(2, 5)
+            
+        elif data_type == "sensor_data":
+            # 传感器数据格式
+            temp = random.uniform(20, 35)
+            humidity = random.uniform(40, 80)
+            return f"temp:{temp:.1f}\nhumidity:{humidity:.1f}\nstatus:OK\n"
+            
+        elif data_type == "simple_commands":
+            # 简单的命令格式
+            commands = ["START", "STOP", "RESET", "STATUS", "DATA"]
+            cmd = random.choice(commands)
+            value = random.randint(1, 100)
+            return f"{cmd}:{value}\n"
+            
+        else:  # mixed_data
+            # 混合数据
+            parts = []
+            for _ in range(random.randint(1, 3)):
+                if random.choice([True, False]):
+                    parts.append(str(random.randint(0, 999)))
+                else:
+                    parts.append(random.choice(["OK", "ERROR", "READY", "BUSY"]))
+            return "\n".join(parts) + "\n"
 
 class MockSerialReceiver:
     """集成了模拟串口的接收器，用于测试"""
@@ -183,8 +228,8 @@ class:1\nscore:88\nbbox:100\nbbox:150\nbbox:140\nbbox:200\n"""
         self.serial_receiver.clear_objects()
     
     def test_baudrate_detection(self):
-        """测试波特率检测功能"""
-        print("=== 模拟串口波特率检测测试 ===\n")
+        """测试波特率检测功能 - 通用版本"""
+        print("=== 模拟串口波特率检测测试 (通用版本) ===\n")
         
         # 创建模拟串口
         self.create_mock_port("MOCK_TEST_PORT", 115200)
@@ -199,30 +244,29 @@ class:1\nscore:88\nbbox:100\nbbox:150\nbbox:140\nbbox:200\n"""
             self.mock_serial.baudrate = baudrate
             self.mock_serial.open()
             
-            # 添加测试数据
+            # 根据波特率模拟不同质量的数据
             if baudrate == 115200:
-                # 115200时数据质量最好
-                test_data = """class:1\nscore:95\nbbox:10\nbbox:20\nbbox:50\nbbox:60\n
-class:2\nscore:88\nbbox:100\nbbox:110\nbbox:140\nbbox:150\n"""
+                # 115200时数据质量最好 - 包含结构化数据和数字
+                test_data = "sensor1:25.6\nsensor2:30.2\nstatus:OK\ndata:12345\n2\n2\n2\n"
             elif baudrate == 9600:
-                # 9600时数据质量中等
-                test_data = "class:0\nscore:75\nbbox:30\nbbox:40\nbbox:70\nbbox:80\n"
+                # 9600时数据质量中等 - 简单的数字循环
+                test_data = "2\n2\n2\n2\n2\ntemp:23\n"
             else:
-                # 其他波特率数据质量较差
-                test_data = "class:1\nscore:65\n"  # 不完整的数据
+                # 其他波特率数据质量较差 - 部分乱码
+                test_data = "2\n??\x01\x02garbled"
             
             self.mock_serial.add_data(test_data)
             
             # 评估数据质量
             score = self.serial_receiver._evaluate_data_quality([test_data])
             test_results[baudrate] = score
-            print(f"  质量评分: {score}")
+            print(f"  质量评分: {score:.1f}")
             
             self.mock_serial.close()
         
         # 找出最佳波特率
         best_baudrate = max(test_results, key=test_results.get)
-        print(f"\n✓ 检测到最佳波特率: {best_baudrate} (评分: {test_results[best_baudrate]})")
+        print(f"\n✓ 检测到最佳波特率: {best_baudrate} (评分: {test_results[best_baudrate]:.1f})")
         
         return best_baudrate, test_results
 
