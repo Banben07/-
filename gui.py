@@ -8,7 +8,7 @@ from PIL import Image, ImageTk
 import serial
 
 # 导入自定义模块
-from serial_receive import SerialReceiver
+from serial_receive import SerialReceiver, MultiPortManager
 from pic import ImageProcessor
 from box import BoxProcessor
 
@@ -955,11 +955,664 @@ class DetectionGUI:
         
         self._update_status("GUI已重新初始化")
 
+class MultiPortGUI:
+    """
+    多端口GUI界面
+    支持同时管理和显示两个串口的数据
+    """
+    
+    def __init__(self, root):
+        self.root = root
+        self.root.title("双端口串口目标检测显示器")
+        self.root.geometry("1200x700")
+        self.root.resizable(True, True)
+        
+        # 初始化多端口管理器
+        self.port_manager = MultiPortManager(max_ports=2)
+        self.image_processor = ImageProcessor()
+        self.box_processor = BoxProcessor()
+        
+        # 创建空白图像
+        self.image_processor.create_blank_image()
+        
+        # 界面刷新间隔(毫秒)
+        self.update_interval = 100
+        
+        # 是否自动更新图像
+        self.auto_update = True
+        
+        # 检测阈值
+        self.score_threshold = 0
+        
+        # 缩放比例
+        self.zoom_factor = 1.0
+        
+        # 端口配置
+        self.port_configs = {
+            'port1': {'name': '端口1', 'color': 'red', 'enabled': True},
+            'port2': {'name': '端口2', 'color': 'blue', 'enabled': True}
+        }
+        
+        # 串口数据存储
+        self.port1_data = []
+        self.port2_data = []
+        
+        # 初始化界面
+        self._init_ui()
+        
+        # 启动更新线程
+        self.is_running = True
+        self.update_thread = Thread(target=self._update_loop, daemon=True)
+        self.update_thread.start()
+    
+    def _init_ui(self):
+        """初始化多端口GUI界面"""
+        # 创建主窗口框架
+        main_frame = ttk.Frame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # 左侧控制面板
+        control_frame = ttk.LabelFrame(main_frame, text="多端口控制面板")
+        control_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # 右侧显示区域
+        display_frame = ttk.LabelFrame(main_frame, text="数据显示")
+        display_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # 创建控制面板内容
+        self._init_control_panel(control_frame)
+        
+        # 创建显示区域内容
+        self._init_display_area(display_frame)
+    
+    def _init_control_panel(self, parent):
+        """初始化控制面板"""
+        # 端口1设置
+        port1_frame = ttk.LabelFrame(parent, text="端口1设置")
+        port1_frame.pack(fill=tk.X, padx=5, pady=5)
+        self._create_port_controls(port1_frame, 'port1')
+        
+        # 端口2设置
+        port2_frame = ttk.LabelFrame(parent, text="端口2设置")
+        port2_frame.pack(fill=tk.X, padx=5, pady=5)
+        self._create_port_controls(port2_frame, 'port2')
+        
+        # 全局控制
+        global_frame = ttk.LabelFrame(parent, text="全局控制")
+        global_frame.pack(fill=tk.X, padx=5, pady=5)
+        self._create_global_controls(global_frame)
+        
+        # 状态显示
+        status_frame = ttk.LabelFrame(parent, text="端口状态")
+        status_frame.pack(fill=tk.X, padx=5, pady=5)
+        self._create_status_display(status_frame)
+        
+        # 图像控制
+        image_frame = ttk.LabelFrame(parent, text="图像控制")
+        image_frame.pack(fill=tk.X, padx=5, pady=5)
+        self._create_image_controls(image_frame)
+    
+    def _create_port_controls(self, parent, port_id):
+        """创建单个端口的控制组件"""
+        # 端口选择
+        ttk.Label(parent, text="选择串口:").pack(anchor=tk.W, padx=5, pady=2)
+        port_combo = ttk.Combobox(parent, width=15)
+        port_combo.pack(fill=tk.X, padx=5, pady=2)
+        setattr(self, f'{port_id}_combo', port_combo)
+        
+        # 波特率设置
+        baudrate_frame = ttk.Frame(parent)
+        baudrate_frame.pack(fill=tk.X, padx=5, pady=2)
+        
+        ttk.Label(baudrate_frame, text="波特率:").pack(anchor=tk.W)
+        
+        baud_control_frame = ttk.Frame(baudrate_frame)
+        baud_control_frame.pack(fill=tk.X)
+        
+        baudrate_combo = ttk.Combobox(baud_control_frame, width=10)
+        baudrate_combo['values'] = ('9600', '19200', '38400', '57600', '115200', '230400', '460800', '921600')
+        baudrate_combo.current(4)  # 设置为115200
+        baudrate_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        setattr(self, f'{port_id}_baudrate', baudrate_combo)
+        
+        # 自动检测波特率
+        auto_detect_var = tk.BooleanVar(value=False)
+        auto_detect_check = ttk.Checkbutton(
+            baud_control_frame, 
+            text="自动", 
+            variable=auto_detect_var
+        )
+        auto_detect_check.pack(side=tk.RIGHT, padx=(5, 0))
+        setattr(self, f'{port_id}_auto_detect', auto_detect_var)
+        
+        # 端口操作按钮
+        button_frame = ttk.Frame(parent)
+        button_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        connect_btn = ttk.Button(button_frame, text="连接", 
+                                command=lambda: self._connect_port(port_id))
+        connect_btn.pack(side=tk.LEFT, padx=2)
+        setattr(self, f'{port_id}_connect_btn', connect_btn)
+        
+        disconnect_btn = ttk.Button(button_frame, text="断开", 
+                                   command=lambda: self._disconnect_port(port_id))
+        disconnect_btn.pack(side=tk.LEFT, padx=2)
+        disconnect_btn.config(state=tk.DISABLED)
+        setattr(self, f'{port_id}_disconnect_btn', disconnect_btn)
+        
+        # 端口启用状态
+        enabled_var = tk.BooleanVar(value=True)
+        enabled_check = ttk.Checkbutton(
+            parent, 
+            text="启用此端口", 
+            variable=enabled_var,
+            command=lambda: self._toggle_port_enabled(port_id)
+        )
+        enabled_check.pack(anchor=tk.W, padx=5, pady=2)
+        setattr(self, f'{port_id}_enabled', enabled_var)
+    
+    def _create_global_controls(self, parent):
+        """创建全局控制组件"""
+        # 刷新端口按钮
+        refresh_btn = ttk.Button(parent, text="刷新所有端口", command=self._refresh_all_ports)
+        refresh_btn.pack(fill=tk.X, padx=5, pady=2)
+        
+        # 全局连接/断开按钮
+        global_button_frame = ttk.Frame(parent)
+        global_button_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        connect_all_btn = ttk.Button(global_button_frame, text="连接所有", command=self._connect_all_ports)
+        connect_all_btn.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        
+        disconnect_all_btn = ttk.Button(global_button_frame, text="断开所有", command=self._disconnect_all_ports)
+        disconnect_all_btn.pack(side=tk.RIGHT, padx=2, fill=tk.X, expand=True)
+        
+        # 清理数据按钮
+        clear_btn = ttk.Button(parent, text="清理所有数据", command=self._clear_all_data)
+        clear_btn.pack(fill=tk.X, padx=5, pady=2)
+    
+    def _create_status_display(self, parent):
+        """创建状态显示组件"""
+        # 创建状态文本框
+        self.status_text = scrolledtext.ScrolledText(parent, height=6, width=40)
+        self.status_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # 自动滚动到底部
+        self.auto_scroll_var = tk.BooleanVar(value=True)
+        auto_scroll_check = ttk.Checkbutton(
+            parent, 
+            text="自动滚动", 
+            variable=self.auto_scroll_var
+        )
+        auto_scroll_check.pack(anchor=tk.W, padx=5, pady=2)
+    
+    def _create_image_controls(self, parent):
+        """创建图像控制组件"""
+        # 加载图像按钮
+        load_image_btn = ttk.Button(parent, text="加载背景图像", command=self._load_image)
+        load_image_btn.pack(fill=tk.X, padx=5, pady=2)
+        
+        # 自动更新选项
+        self.auto_update_var = tk.BooleanVar(value=True)
+        auto_update_check = ttk.Checkbutton(
+            parent, 
+            text="自动更新图像", 
+            variable=self.auto_update_var,
+            command=self._toggle_auto_update
+        )
+        auto_update_check.pack(anchor=tk.W, padx=5, pady=2)
+        
+        # 手动更新按钮
+        self.manual_update_btn = ttk.Button(parent, text="手动更新", command=self._update_image)
+        self.manual_update_btn.pack(fill=tk.X, padx=5, pady=2)
+        self.manual_update_btn.config(state=tk.DISABLED)
+        
+        # 保存图像按钮
+        save_image_btn = ttk.Button(parent, text="保存图像", command=self._save_image)
+        save_image_btn.pack(fill=tk.X, padx=5, pady=2)
+        
+        # 显示选项
+        display_options_frame = ttk.LabelFrame(parent, text="显示选项")
+        display_options_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # 端口1显示选项
+        self.port1_show_var = tk.BooleanVar(value=True)
+        port1_check = ttk.Checkbutton(
+            display_options_frame, 
+            text="显示端口1", 
+            variable=self.port1_show_var
+        )
+        port1_check.pack(anchor=tk.W, padx=5, pady=2)
+        
+        # 端口2显示选项
+        self.port2_show_var = tk.BooleanVar(value=True)
+        port2_check = ttk.Checkbutton(
+            display_options_frame, 
+            text="显示端口2", 
+            variable=self.port2_show_var
+        )
+        port2_check.pack(anchor=tk.W, padx=5, pady=2)
+    
+    def _init_display_area(self, parent):
+        """初始化显示区域"""
+        # 创建notebook用于标签页显示
+        self.notebook = ttk.Notebook(parent)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # 图像显示标签页
+        image_frame = ttk.Frame(self.notebook)
+        self.notebook.add(image_frame, text="图像显示")
+        
+        # 数据显示标签页
+        data_frame = ttk.Frame(self.notebook)
+        self.notebook.add(data_frame, text="串口数据")
+        
+        # 初始化各个标签页
+        self._init_image_tab(image_frame)
+        self._init_data_tab(data_frame)
+    
+    def _init_image_tab(self, parent):
+        """初始化图像显示标签页"""
+        # 缩放控制
+        zoom_frame = ttk.Frame(parent)
+        zoom_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(zoom_frame, text="缩放:").pack(side=tk.LEFT)
+        
+        zoom_out_btn = ttk.Button(zoom_frame, text="-", width=2, command=self._zoom_out)
+        zoom_out_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.zoom_label = ttk.Label(zoom_frame, text="100%")
+        self.zoom_label.pack(side=tk.LEFT, padx=5)
+        
+        zoom_in_btn = ttk.Button(zoom_frame, text="+", width=2, command=self._zoom_in)
+        zoom_in_btn.pack(side=tk.LEFT, padx=5)
+        
+        reset_zoom_btn = ttk.Button(zoom_frame, text="重置", width=5, command=self._reset_zoom)
+        reset_zoom_btn.pack(side=tk.LEFT, padx=5)
+        
+        # 图像显示画布
+        self.image_canvas = tk.Canvas(parent, bg="white")
+        self.image_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+    
+    def _init_data_tab(self, parent):
+        """初始化数据显示标签页"""
+        # 创建双栏布局显示两个端口的数据
+        paned_window = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
+        paned_window.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # 端口1数据显示
+        port1_frame = ttk.LabelFrame(paned_window, text="端口1数据")
+        paned_window.add(port1_frame, weight=1)
+        
+        self.port1_data_text = scrolledtext.ScrolledText(port1_frame, height=20, width=40)
+        self.port1_data_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # 端口2数据显示
+        port2_frame = ttk.LabelFrame(paned_window, text="端口2数据")
+        paned_window.add(port2_frame, weight=1)
+        
+        self.port2_data_text = scrolledtext.ScrolledText(port2_frame, height=20, width=40)
+        self.port2_data_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # 数据控制按钮
+        data_control_frame = ttk.Frame(parent)
+        data_control_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        clear_port1_btn = ttk.Button(data_control_frame, text="清空端口1", 
+                                    command=lambda: self._clear_port_data('port1'))
+        clear_port1_btn.pack(side=tk.LEFT, padx=5)
+        
+        clear_port2_btn = ttk.Button(data_control_frame, text="清空端口2", 
+                                    command=lambda: self._clear_port_data('port2'))
+        clear_port2_btn.pack(side=tk.LEFT, padx=5)
+        
+        clear_all_data_btn = ttk.Button(data_control_frame, text="清空所有数据", 
+                                       command=self._clear_all_data_display)
+        clear_all_data_btn.pack(side=tk.RIGHT, padx=5)
+    
+    def _refresh_all_ports(self):
+        """刷新所有串口列表"""
+        try:
+            # 创建临时接收器获取端口列表
+            temp_receiver = SerialReceiver()
+            ports = temp_receiver.list_ports()
+            
+            # 更新两个端口的下拉列表
+            self.port1_combo['values'] = ports
+            self.port2_combo['values'] = ports
+            
+            self._update_status("已刷新串口列表")
+            
+        except Exception as e:
+            self._update_status(f"刷新串口列表失败: {e}")
+    
+    def _connect_port(self, port_id):
+        """连接指定端口"""
+        try:
+            port_combo = getattr(self, f'{port_id}_combo')
+            baudrate_combo = getattr(self, f'{port_id}_baudrate')
+            auto_detect_var = getattr(self, f'{port_id}_auto_detect')
+            
+            port_path = port_combo.get()
+            if not port_path:
+                messagebox.showwarning("警告", f"请选择{self.port_configs[port_id]['name']}的串口")
+                return
+            
+            baudrate = int(baudrate_combo.get())
+            auto_detect = auto_detect_var.get()
+            
+            # 添加端口到管理器
+            if not self.port_manager.add_port(port_id, port_path, baudrate, auto_detect):
+                self._update_status(f"{self.port_configs[port_id]['name']}添加失败")
+                return
+            
+            # 连接端口
+            if self.port_manager.connect_port(port_id):
+                # 开始接收数据
+                receiver = self.port_manager.get_receiver(port_id)
+                if receiver:
+                    receiver.start_receiving()
+                
+                # 更新按钮状态
+                connect_btn = getattr(self, f'{port_id}_connect_btn')
+                disconnect_btn = getattr(self, f'{port_id}_disconnect_btn')
+                connect_btn.config(state=tk.DISABLED)
+                disconnect_btn.config(state=tk.NORMAL)
+                
+                self._update_status(f"{self.port_configs[port_id]['name']}连接成功")
+            else:
+                self.port_manager.remove_port(port_id)
+                self._update_status(f"{self.port_configs[port_id]['name']}连接失败")
+                
+        except Exception as e:
+            self._update_status(f"{self.port_configs[port_id]['name']}连接异常: {e}")
+    
+    def _disconnect_port(self, port_id):
+        """断开指定端口"""
+        try:
+            if self.port_manager.disconnect_port(port_id):
+                self.port_manager.remove_port(port_id)
+                
+                # 更新按钮状态
+                connect_btn = getattr(self, f'{port_id}_connect_btn')
+                disconnect_btn = getattr(self, f'{port_id}_disconnect_btn')
+                connect_btn.config(state=tk.NORMAL)
+                disconnect_btn.config(state=tk.DISABLED)
+                
+                self._update_status(f"{self.port_configs[port_id]['name']}已断开连接")
+            else:
+                self._update_status(f"{self.port_configs[port_id]['name']}断开连接失败")
+                
+        except Exception as e:
+            self._update_status(f"{self.port_configs[port_id]['name']}断开连接异常: {e}")
+    
+    def _connect_all_ports(self):
+        """连接所有端口"""
+        for port_id in ['port1', 'port2']:
+            enabled_var = getattr(self, f'{port_id}_enabled')
+            if enabled_var.get():
+                self._connect_port(port_id)
+    
+    def _disconnect_all_ports(self):
+        """断开所有端口连接"""
+        for port_id in ['port1', 'port2']:
+            self._disconnect_port(port_id)
+    
+    def _toggle_port_enabled(self, port_id):
+        """切换端口启用状态"""
+        enabled_var = getattr(self, f'{port_id}_enabled')
+        enabled = enabled_var.get()
+        self.port_configs[port_id]['enabled'] = enabled
+        
+        # 如果禁用端口且已连接，则断开连接
+        if not enabled:
+            self._disconnect_port(port_id)
+        
+        self._update_status(f"{self.port_configs[port_id]['name']}{'启用' if enabled else '禁用'}")
+    
+    def _clear_all_data(self):
+        """清理所有端口数据"""
+        self.port_manager.clear_all_objects()
+        self._clear_all_data_display()
+        self._update_status("已清理所有端口数据")
+    
+    def _clear_port_data(self, port_id):
+        """清空指定端口的数据显示"""
+        if port_id == 'port1':
+            self.port1_data_text.delete(1.0, tk.END)
+            self.port1_data = []
+        elif port_id == 'port2':
+            self.port2_data_text.delete(1.0, tk.END)
+            self.port2_data = []
+    
+    def _clear_all_data_display(self):
+        """清空所有数据显示"""
+        self.port1_data_text.delete(1.0, tk.END)
+        self.port2_data_text.delete(1.0, tk.END)
+        self.port1_data = []
+        self.port2_data = []
+    
+    def _load_image(self):
+        """加载背景图像"""
+        try:
+            file_path = filedialog.askopenfilename(
+                title="选择图像文件",
+                filetypes=[("图像文件", "*.jpg *.jpeg *.png *.bmp *.gif"), ("所有文件", "*.*")]
+            )
+            
+            if file_path:
+                self.image_processor.load_image(file_path)
+                self._update_image()
+                self._update_status(f"已加载图像: {file_path}")
+                
+        except Exception as e:
+            messagebox.showerror("错误", f"加载图像失败: {e}")
+    
+    def _update_image(self):
+        """更新图像显示"""
+        try:
+            # 获取所有端口的检测目标
+            all_objects = self.port_manager.get_all_detected_objects()
+            
+            # 根据显示选项过滤目标
+            filtered_objects = []
+            
+            if self.port1_show_var.get() and 'port1' in all_objects:
+                for obj in all_objects['port1']:
+                    obj_copy = obj.copy()
+                    obj_copy['color'] = self.port_configs['port1']['color']
+                    obj_copy['source'] = 'port1'
+                    filtered_objects.append(obj_copy)
+            
+            if self.port2_show_var.get() and 'port2' in all_objects:
+                for obj in all_objects['port2']:
+                    obj_copy = obj.copy()
+                    obj_copy['color'] = self.port_configs['port2']['color']
+                    obj_copy['source'] = 'port2'
+                    filtered_objects.append(obj_copy)
+            
+            # 更新图像处理器的目标
+            self.box_processor.set_objects(filtered_objects)
+            
+            # 绘制图像
+            result_image = self.image_processor.get_image()
+            if result_image:
+                # 在图像上绘制检测框
+                result_image = self.box_processor.draw_boxes_on_image(result_image, filtered_objects)
+                self._update_image_display(result_image)
+                
+        except Exception as e:
+            self._update_status(f"更新图像失败: {e}")
+    
+    def _update_image_display(self, image):
+        """更新图像显示到画布"""
+        try:
+            # 应用缩放
+            width = int(image.width * self.zoom_factor)
+            height = int(image.height * self.zoom_factor)
+            resized_image = image.resize((width, height), Image.Resampling.LANCZOS)
+            
+            # 转换为Tkinter格式
+            photo = ImageTk.PhotoImage(resized_image)
+            
+            # 清空画布并显示图像
+            self.image_canvas.delete("all")
+            self.image_canvas.config(scrollregion=(0, 0, width, height))
+            self.image_canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+            
+            # 保持引用防止垃圾回收
+            self.image_canvas.image = photo
+            
+        except Exception as e:
+            self._update_status(f"显示图像失败: {e}")
+    
+    def _save_image(self):
+        """保存当前图像"""
+        try:
+            result_image = self.image_processor.get_image()
+            if result_image:
+                file_path = filedialog.asksaveasfilename(
+                    title="保存图像",
+                    defaultextension=".png",
+                    filetypes=[("PNG文件", "*.png"), ("JPEG文件", "*.jpg"), ("所有文件", "*.*")]
+                )
+                
+                if file_path:
+                    result_image.save(file_path)
+                    self._update_status(f"图像已保存: {file_path}")
+            else:
+                messagebox.showwarning("警告", "没有可保存的图像")
+                
+        except Exception as e:
+            messagebox.showerror("错误", f"保存图像失败: {e}")
+    
+    def _toggle_auto_update(self):
+        """切换自动更新状态"""
+        self.auto_update = self.auto_update_var.get()
+        self.manual_update_btn.config(state=tk.DISABLED if self.auto_update else tk.NORMAL)
+        self._update_status(f"自动更新: {'开启' if self.auto_update else '关闭'}")
+    
+    def _zoom_in(self):
+        """放大图像"""
+        if self.zoom_factor < 3.0:
+            self.zoom_factor *= 1.2
+            self._update_zoom_label()
+            if self.auto_update:
+                self._update_image()
+    
+    def _zoom_out(self):
+        """缩小图像"""
+        if self.zoom_factor > 0.1:
+            self.zoom_factor /= 1.2
+            self._update_zoom_label()
+            if self.auto_update:
+                self._update_image()
+    
+    def _reset_zoom(self):
+        """重置缩放比例"""
+        self.zoom_factor = 1.0
+        self._update_zoom_label()
+        if self.auto_update:
+            self._update_image()
+    
+    def _update_zoom_label(self):
+        """更新缩放标签"""
+        self.zoom_label.config(text=f"{int(self.zoom_factor * 100)}%")
+    
+    def _update_status(self, message):
+        """更新状态信息"""
+        timestamp = time.strftime("%H:%M:%S")
+        status_message = f"[{timestamp}] {message}\n"
+        
+        self.status_text.insert(tk.END, status_message)
+        
+        # 自动滚动到底部
+        if self.auto_scroll_var.get():
+            self.status_text.see(tk.END)
+    
+    def _update_loop(self):
+        """主更新循环"""
+        while self.is_running:
+            try:
+                # 检查是否有新数据
+                if self.port_manager.has_new_data_any_port():
+                    # 更新串口数据显示
+                    self._update_serial_data_display()
+                    
+                    # 自动更新图像
+                    if self.auto_update:
+                        self._update_image()
+                
+            except Exception as e:
+                print(f"更新循环异常: {e}")
+            
+            time.sleep(self.update_interval / 1000.0)
+    
+    def _update_serial_data_display(self):
+        """更新串口数据显示"""
+        try:
+            # 获取所有端口的检测目标
+            all_objects = self.port_manager.get_all_detected_objects()
+            
+            # 更新端口1数据
+            if 'port1' in all_objects and all_objects['port1']:
+                self._append_port_data('port1', all_objects['port1'])
+            
+            # 更新端口2数据
+            if 'port2' in all_objects and all_objects['port2']:
+                self._append_port_data('port2', all_objects['port2'])
+                
+        except Exception as e:
+            self._update_status(f"更新串口数据显示失败: {e}")
+    
+    def _append_port_data(self, port_id, objects):
+        """添加端口数据到显示区域"""
+        try:
+            text_widget = getattr(self, f'{port_id}_data_text')
+            timestamp = time.strftime("%H:%M:%S")
+            
+            for obj in objects:
+                data_line = f"[{timestamp}] 类别:{obj['class']} 置信度:{obj['score']} 位置:{obj['bbox']}\n"
+                text_widget.insert(tk.END, data_line)
+            
+            # 自动滚动到底部
+            text_widget.see(tk.END)
+            
+            # 限制显示行数，避免内存过多占用
+            lines = text_widget.get(1.0, tk.END).split('\n')
+            if len(lines) > 1000:  # 保留最新1000行
+                text_widget.delete(1.0, f"{len(lines) - 1000}.0")
+                
+        except Exception as e:
+            self._update_status(f"添加{port_id}数据失败: {e}")
+    
+    def on_closing(self):
+        """窗口关闭处理"""
+        self.is_running = False
+        self.port_manager.stop_all_receiving()
+        self.root.destroy()
+
 def main():
     root = tk.Tk()
     app = DetectionGUI(root)
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     root.mainloop()
+
+def start_multi_port_gui():
+    """启动多端口GUI"""
+    root = tk.Tk()
+    gui = MultiPortGUI(root)
+    
+    # 设置关闭处理
+    root.protocol("WM_DELETE_WINDOW", gui.on_closing)
+    
+    # 启动GUI
+    root.mainloop()
     
 if __name__ == "__main__":
-    main()
+    # 根据参数选择启动模式
+    if len(sys.argv) > 1 and sys.argv[1] == "--multi":
+        start_multi_port_gui()
+    else:
+        main()

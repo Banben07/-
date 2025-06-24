@@ -1219,6 +1219,531 @@ class SerialReceiver:
         
         return 0.0
 
+class MultiPortManager:
+    """
+    多端口管理器
+    用于同时管理和处理多个串口连接
+    """
+    
+    def __init__(self, max_ports=2):
+        self.max_ports = max_ports
+        self.receivers = {}  # 端口名 -> SerialReceiver实例
+        self.port_configs = {}  # 端口名 -> 配置信息
+        self.data_lock = Lock()
+        self.is_running = False
+        self.update_callbacks = []  # 数据更新回调函数
+        
+    def add_port(self, port_name, port_path, baudrate=9600, auto_detect=False):
+        """
+        添加一个串口
+        
+        Args:
+            port_name: 端口名称（用于标识）
+            port_path: 实际串口路径
+            baudrate: 波特率
+            auto_detect: 是否自动检测波特率
+            
+        Returns:
+            bool: 是否成功添加
+        """
+        if len(self.receivers) >= self.max_ports:
+            print(f"已达到最大端口数限制: {self.max_ports}")
+            return False
+            
+        if port_name in self.receivers:
+            print(f"端口 {port_name} 已存在")
+            return False
+        
+        # 创建串口接收器
+        receiver = SerialReceiver(port=port_path, baudrate=baudrate)
+        receiver.auto_detect_baudrate = auto_detect
+        
+        self.receivers[port_name] = receiver
+        self.port_configs[port_name] = {
+            'port_path': port_path,
+            'baudrate': baudrate,
+            'auto_detect': auto_detect,
+            'connected': False,
+            'last_update': time.time()
+        }
+        
+        print(f"已添加端口 {port_name}: {port_path}")
+        return True
+    
+    def remove_port(self, port_name):
+        """
+        移除一个串口
+        
+        Args:
+            port_name: 端口名称
+            
+        Returns:
+            bool: 是否成功移除
+        """
+        if port_name not in self.receivers:
+            print(f"端口 {port_name} 不存在")
+            return False
+        
+        # 先断开连接
+        self.disconnect_port(port_name)
+        
+        # 移除端口
+        del self.receivers[port_name]
+        del self.port_configs[port_name]
+        
+        print(f"已移除端口 {port_name}")
+        return True
+    
+    def connect_port(self, port_name):
+        """
+        连接指定端口
+        
+        Args:
+            port_name: 端口名称
+            
+        Returns:
+            bool: 是否成功连接
+        """
+        if port_name not in self.receivers:
+            print(f"端口 {port_name} 不存在")
+            return False
+        
+        receiver = self.receivers[port_name]
+        config = self.port_configs[port_name]
+        
+        try:
+            if config['auto_detect']:
+                # 使用自动检测连接
+                result = receiver.connect_with_auto_detect(config['port_path'])
+                if result:
+                    config['connected'] = True
+                    config['baudrate'] = receiver.detected_baudrate or config['baudrate']
+                    print(f"端口 {port_name} 自动检测连接成功，波特率: {config['baudrate']}")
+                    return True
+            else:
+                # 使用指定波特率连接
+                if receiver.connect(config['port_path']):
+                    config['connected'] = True
+                    print(f"端口 {port_name} 连接成功")
+                    return True
+            
+            print(f"端口 {port_name} 连接失败")
+            return False
+            
+        except Exception as e:
+            print(f"端口 {port_name} 连接异常: {e}")
+            return False
+    
+    def disconnect_port(self, port_name):
+        """
+        断开指定端口
+        
+        Args:
+            port_name: 端口名称
+            
+        Returns:
+            bool: 是否成功断开
+        """
+        if port_name not in self.receivers:
+            print(f"端口 {port_name} 不存在")
+            return False
+        
+        receiver = self.receivers[port_name]
+        config = self.port_configs[port_name]
+        
+        try:
+            receiver.disconnect()
+            config['connected'] = False
+            print(f"端口 {port_name} 已断开连接")
+            return True
+        except Exception as e:
+            print(f"端口 {port_name} 断开连接异常: {e}")
+            return False
+    
+    def connect_all_ports(self):
+        """
+        连接所有端口
+        
+        Returns:
+            dict: 每个端口的连接结果 {port_name: success}
+        """
+        results = {}
+        for port_name in self.receivers:
+            results[port_name] = self.connect_port(port_name)
+        return results
+    
+    def disconnect_all_ports(self):
+        """
+        断开所有端口连接
+        
+        Returns:
+            dict: 每个端口的断开结果 {port_name: success}
+        """
+        results = {}
+        for port_name in self.receivers:
+            results[port_name] = self.disconnect_port(port_name)
+        return results
+    
+    def start_all_receiving(self):
+        """
+        开始所有端口的数据接收
+        """
+        self.is_running = True
+        for port_name, receiver in self.receivers.items():
+            if self.port_configs[port_name]['connected']:
+                receiver.start_receiving()
+                print(f"端口 {port_name} 开始接收数据")
+    
+    def stop_all_receiving(self):
+        """
+        停止所有端口的数据接收
+        """
+        self.is_running = False
+        for port_name, receiver in self.receivers.items():
+            try:
+                receiver.disconnect()
+            except:
+                pass
+    
+    def get_all_detected_objects(self):
+        """
+        获取所有端口检测到的目标
+        
+        Returns:
+            dict: {port_name: [objects]}
+        """
+        all_objects = {}
+        for port_name, receiver in self.receivers.items():
+            if self.port_configs[port_name]['connected']:
+                objects = receiver.get_detected_objects()
+                all_objects[port_name] = objects
+                
+                # 更新最后更新时间
+                if objects:
+                    self.port_configs[port_name]['last_update'] = time.time()
+        
+        return all_objects
+    
+    def get_combined_objects(self):
+        """
+        获取所有端口的目标合并结果
+        添加端口标识信息
+        
+        Returns:
+            list: 合并后的目标列表，每个目标包含source_port字段
+        """
+        combined_objects = []
+        all_objects = self.get_all_detected_objects()
+        
+        for port_name, objects in all_objects.items():
+            for obj in objects:
+                # 为每个目标添加来源端口信息
+                obj_with_source = obj.copy()
+                obj_with_source['source_port'] = port_name
+                obj_with_source['port_name'] = port_name
+                combined_objects.append(obj_with_source)
+        
+        return combined_objects
+    
+    def get_port_status(self):
+        """
+        获取所有端口状态
+        
+        Returns:
+            dict: 端口状态信息
+        """
+        status = {}
+        for port_name, config in self.port_configs.items():
+            receiver = self.receivers[port_name]
+            
+            port_status = {
+                'port_path': config['port_path'],
+                'baudrate': config['baudrate'],
+                'connected': config['connected'],
+                'auto_detect': config['auto_detect'],
+                'last_update': config['last_update'],
+                'object_count': len(receiver.get_detected_objects()) if config['connected'] else 0,
+                'total_objects': len(receiver.get_all_objects()) if config['connected'] else 0,
+                'has_new_data': receiver.has_new_data() if config['connected'] else False
+            }
+            
+            # 添加连接信息
+            if config['connected'] and hasattr(receiver, 'get_connection_info'):
+                conn_info = receiver.get_connection_info()
+                port_status.update(conn_info)
+            
+            status[port_name] = port_status
+        
+        return status
+    
+    def clear_all_objects(self):
+        """
+        清空所有端口的目标数据
+        """
+        for receiver in self.receivers.values():
+            receiver.clear_objects()
+        print("已清空所有端口的目标数据")
+    
+    def restart_all_receiving(self):
+        """
+        重启所有端口的数据接收
+        """
+        for port_name, receiver in self.receivers.items():
+            if self.port_configs[port_name]['connected']:
+                receiver.restart_receiving()
+        print("已重启所有端口的数据接收")
+    
+    def add_update_callback(self, callback):
+        """
+        添加数据更新回调函数
+        
+        Args:
+            callback: 回调函数，接收参数 (port_name, objects)
+        """
+        self.update_callbacks.append(callback)
+    
+    def remove_update_callback(self, callback):
+        """
+        移除数据更新回调函数
+        
+        Args:
+            callback: 要移除的回调函数
+        """
+        if callback in self.update_callbacks:
+            self.update_callbacks.remove(callback)
+    
+    def _notify_update_callbacks(self, port_name, objects):
+        """
+        通知所有更新回调函数
+        
+        Args:
+            port_name: 端口名称
+            objects: 检测到的目标列表
+        """
+        for callback in self.update_callbacks:
+            try:
+                callback(port_name, objects)
+            except Exception as e:
+                print(f"回调函数执行异常: {e}")
+    
+    def get_port_names(self):
+        """
+        获取所有端口名称
+        
+        Returns:
+            list: 端口名称列表
+        """
+        return list(self.receivers.keys())
+    
+    def get_receiver(self, port_name):
+        """
+        获取指定端口的接收器实例
+        
+        Args:
+            port_name: 端口名称
+            
+        Returns:
+            SerialReceiver: 接收器实例，如果不存在返回None
+        """
+        return self.receivers.get(port_name)
+    
+    def has_new_data_any_port(self):
+        """
+        检查是否有任何端口有新数据
+        
+        Returns:
+            bool: 是否有新数据
+        """
+        for port_name, receiver in self.receivers.items():
+            if self.port_configs[port_name]['connected'] and receiver.has_new_data():
+                return True
+        return False
+    
+    def update_port_config(self, port_name, **kwargs):
+        """
+        更新端口配置
+        
+        Args:
+            port_name: 端口名称
+            **kwargs: 要更新的配置项
+            
+        Returns:
+            bool: 是否成功更新
+        """
+        if port_name not in self.port_configs:
+            return False
+        
+        config = self.port_configs[port_name]
+        receiver = self.receivers[port_name]
+        
+        # 更新配置
+        for key, value in kwargs.items():
+            if key in config:
+                config[key] = value
+                
+                # 同步更新接收器配置
+                if key == 'baudrate':
+                    receiver.baudrate = value
+                elif key == 'auto_detect':
+                    receiver.auto_detect_baudrate = value
+        
+        return True
+    
+    def send_data_to_port(self, port_name, data, as_hex=False):
+        """
+        向指定端口发送数据
+        
+        Args:
+            port_name: 端口名称
+            data: 要发送的数据（字符串）
+            as_hex: 是否作为十六进制发送
+            
+        Returns:
+            bool: 是否发送成功
+        """
+        if port_name not in self.receivers:
+            print(f"端口 {port_name} 不存在")
+            return False
+        
+        if not self.port_configs[port_name]['connected']:
+            print(f"端口 {port_name} 未连接")
+            return False
+        
+        receiver = self.receivers[port_name]
+        
+        try:
+            if not receiver.serial or not receiver.serial.is_open:
+                print(f"端口 {port_name} 串口未打开")
+                return False
+            
+            # 转换数据格式
+            if as_hex:
+                # 移除空格和换行符，转换十六进制
+                clean_data = data.replace(" ", "").replace("\n", "").replace("\r", "")
+                byte_data = bytes.fromhex(clean_data)
+            else:
+                # 文本数据，使用UTF-8编码
+                byte_data = data.encode('utf-8', errors='replace')
+            
+            # 发送数据
+            bytes_sent = receiver.serial.write(byte_data)
+            receiver.serial.flush()  # 确保数据发送
+            
+            print(f"端口 {port_name} 发送 {bytes_sent} 字节数据")
+            return True
+            
+        except Exception as e:
+            print(f"端口 {port_name} 发送数据失败: {e}")
+            return False
+    
+    def send_data_to_all_ports(self, data, as_hex=False):
+        """
+        向所有连接的端口发送数据
+        
+        Args:
+            data: 要发送的数据
+            as_hex: 是否作为十六进制发送
+            
+        Returns:
+            dict: 每个端口的发送结果 {port_name: success}
+        """
+        results = {}
+        for port_name in self.receivers:
+            if self.port_configs[port_name]['connected']:
+                results[port_name] = self.send_data_to_port(port_name, data, as_hex)
+            else:
+                results[port_name] = False
+        return results
+    
+    def get_received_data(self, port_name, max_lines=100):
+        """
+        获取指定端口的接收数据
+        
+        Args:
+            port_name: 端口名称
+            max_lines: 最大行数
+            
+        Returns:
+            list: 接收到的数据行列表
+        """
+        if port_name not in self.receivers:
+            return []
+        
+        receiver = self.receivers[port_name]
+        
+        try:
+            # 从数据缓冲区获取原始数据
+            with receiver.data_lock:
+                raw_data = receiver.data_buffer
+            
+            # 按行分割数据
+            lines = raw_data.split('\n')
+            
+            # 返回最新的指定行数
+            return lines[-max_lines:] if len(lines) > max_lines else lines
+            
+        except Exception as e:
+            print(f"获取端口 {port_name} 数据失败: {e}")
+            return []
+    
+    def get_all_received_data(self, max_lines=100):
+        """
+        获取所有端口的接收数据
+        
+        Args:
+            max_lines: 每个端口的最大行数
+            
+        Returns:
+            dict: {port_name: [data_lines]}
+        """
+        all_data = {}
+        for port_name in self.receivers:
+            all_data[port_name] = self.get_received_data(port_name, max_lines)
+        return all_data
+    
+    def clear_port_buffer(self, port_name):
+        """
+        清空指定端口的接收缓冲区
+        
+        Args:
+            port_name: 端口名称
+            
+        Returns:
+            bool: 是否成功清空
+        """
+        if port_name not in self.receivers:
+            return False
+        
+        receiver = self.receivers[port_name]
+        
+        try:
+            with receiver.data_lock:
+                receiver.data_buffer = ""
+            
+            # 也清空串口硬件缓冲区
+            if receiver.serial and receiver.serial.is_open:
+                receiver.serial.reset_input_buffer()
+                receiver.serial.reset_output_buffer()
+            
+            print(f"端口 {port_name} 缓冲区已清空")
+            return True
+            
+        except Exception as e:
+            print(f"清空端口 {port_name} 缓冲区失败: {e}")
+            return False
+    
+    def clear_all_port_buffers(self):
+        """
+        清空所有端口的接收缓冲区
+        
+        Returns:
+            dict: 每个端口的清空结果 {port_name: success}
+        """
+        results = {}
+        for port_name in self.receivers:
+            results[port_name] = self.clear_port_buffer(port_name)
+        return results
+
 # 测试代码
 if __name__ == "__main__":
     receiver = SerialReceiver()

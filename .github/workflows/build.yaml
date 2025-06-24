@@ -12,7 +12,7 @@ jobs:
       - name: Install dependencies  # 关键：安装所有依赖
         run: pip install pyserial Pillow numpy pyinstaller
       - name: Build EXE
-        run: pyinstaller --onefile --windowed gui.py
+        run: pyinstaller --onefile --windowed multiport_comm_gui.py
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
